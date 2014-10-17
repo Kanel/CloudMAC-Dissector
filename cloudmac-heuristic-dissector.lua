@@ -1,26 +1,68 @@
--- Joakim Carlsson: 2014-10-08
+-- Written by: Joakim Carlsson
+-- Last changed: 2014-10-17
+--
+-- CloudMAC packets can take two different forms depending on if they're inbound or outbound.
+--
+-- Inbound: Packets that are routed to a VAP.
+-------------------------------------------------------------------------
+--|                          |                          |               |
+--| Destination              | Source                   | Ethernet Type |
+--|                          |                          |               |
+-------------------------------------------------------------------------
+--| 6 bytes                  | 6 Bytes                  | 2 Bytes       |
+-------------------------------------------------------------------------
+--
+-- Outbound: Packets that are routed from a VAP.
+-------------------------------------------------------------------------
+--|             |         |        |                    |               |
+--| Destination | Signal  | Rate   | VAP Identification | Ethernet Type |
+--|             |         |        |                    |               |
+-------------------------------------------------------------------------
+--| 6 bytes     | 1 Byte  | 1 Byte | 4 Bytes            | 2 Bytes       |
+-------------------------------------------------------------------------
+--
+-- Fields:
+-- | Destination: MAC address of the receiver.
+-- | Source: MAC Address of the sender.
+-- | Signal: Received signal strength in dBm. The intention being that the transmission power should conform to this value rather than the Radiotap headers value.
+-- | Rate: Transmission rate in units of 100 Kbps; a value of 108 would mean 54 Mbps. The intention is to be able to manipulate the transmission rate of traffic by directly changing this value.
+-- | VAP Identification: The identity of the access point handling this traffic; the last four bytes of access points MAC address.
+-- | Ethernet Type: The Ethernet type for CloudMAC packets; it's value is 0x1337 (4919).
+
 local cloudmac = Proto("CloudMAC", "CloudMAC Header")
 local cloudmac_dst = ProtoField.new("Destination", "cloudmac.dst", ftypes.ETHER)
+local cloudmac_src = ProtoField.new("Source", "cloudmac.source", ftypes.ETHER)
+local cloudmac_ethertype = ProtoField.new("Ethernet Type", "cloudmac.ethertype", ftypes.UINT16)
 local cloudmac_signal = ProtoField.new("Signal Strength", "cloudmac.signal", ftypes.UINT8)
 local cloudmac_rate = ProtoField.new("Data Rate", "cloudmac.rate", ftypes.UINT8)
-local cloudmac_src = ProtoField.new("VAP Identification", "cloudmac.src", ftypes.ETHER)
+local cloudmac_vapid = ProtoField.new("VAP Identification", "cloudmac.vapid", ftypes.STRING)
+
+-- I want to read these values later.
+local ieee802_11_bssid_f = Field.new("wlan.bssid")
+local ieee802_11_source_f = Field.new("wlan.sa")
+
+-- Information about fields.
+local CLOUDMAC_DST_OFFSET = 0
 local CLOUDMAC_DST_LEN = 6
+local CLOUDMAC_SRC_OFFSET = 6
+local CLOUDMAC_SRC_LEN = 6
+local CLOUDMAC_SIGNAL_OFFSET = 6
 local CLOUDMAC_SIGNAL_LEN = 1
+local CLOUDMAC_RATE_OFFSET = 7
 local CLOUDMAC_RATE_LEN = 1
-local CLOUDMAC_SOURCE_LEN = 4
-local CLOUDMAC_TYPE_LEN = 2
-local CLOUDMAC_TYPE_OFFSET = CLOUDMAC_DST_LEN + CLOUDMAC_SIGNAL_LEN + CLOUDMAC_RATE_LEN + CLOUDMAC_SOURCE_LEN
-local CLOUDMAC_HEADER_LEN = CLOUDMAC_DST_LEN + CLOUDMAC_SIGNAL_LEN + CLOUDMAC_RATE_LEN + CLOUDMAC_SOURCE_LEN + CLOUDMAC_TYPE_LEN
+local CLOUDMAC_VAPID_OFFSET = 8
+local CLOUDMAC_VAPID_LEN = 4
+local CLOUDMAC_ETHERTYPE_OFFSET = 12
+local CLOUDMAC_ETHERTYPE_LEN = 2
+local CLOUDMAC_HEADER_LEN = 14
+local RADIOTAP_OFFSET = CLOUDMAC_HEADER_LEN
 local RADIOTAP_MIN_LEN = 8
 local RADIOTAP_LEN_OFFSET = 2
 local RADIOTAP_LEN_LEN = 2
 local CLOUDMAC_MIN_LEN = CLOUDMAC_HEADER_LEN + RADIOTAP_MIN_LEN + 1
 
-cloudmac.fields = { cloudmac_dst, cloudmac_signal, cloudmac_rate, cloudmac_src }
-
-function tvbToUint(tvb, i, len)
-	return tvb:range(i, len):uint()
-end
+-- Add fields.
+cloudmac.fields = { cloudmac_dst, cloudmac_src, cloudmac_ethertype, cloudmac_signal, cloudmac_rate, cloudmac_vapid }
 
 function cloudmac.dissector(tvbuf, pktinfo, root)
 	local pktlen = tvbuf:reported_length_remaining()
@@ -30,36 +72,52 @@ function cloudmac.dissector(tvbuf, pktinfo, root)
 	if pktlen < CLOUDMAC_MIN_LEN then
 		tree:add_proto_expert_info(ef_too_short)
 		return 
-	end	
-
-	-- CloudMAC Fields:
-	local source_mac = ByteArray.new("0000" .. tostring(tvbuf:range(8, 4)))
-
-	tree:add(cloudmac_dst, tvbuf:range(0, 6))
-	tree:add(cloudmac_signal, tvbuf:range(6, 1)):append_text(" dBm")
-	tree:add(cloudmac_rate, tvbuf:range(7,1), tvbToUint(tvbuf, 7, 1) * 500 / 1000):append_text(" Mb/s")
-	tree:add(cloudmac_src, ByteArray.tvb(source_mac, "source"):range(0, 6))
-	
-	local radiotap_offset = CLOUDMAC_HEADER_LEN
-	local radiotap_len = tvbuf:range(CLOUDMAC_HEADER_LEN + RADIOTAP_LEN_OFFSET, RADIOTAP_LEN_LEN):le_uint()
-	local wlan_offset = radiotap_offset + radiotap_len
-	local wlan_length = pktlen - wlan_offset
+	end
 	
 	-- Radiotap & 802.11:
-	-- Radiotap willt ake care of the 802.11 frame for us.
-	radiotap:call(tvbuf(radiotap_offset, radiotap_len + wlan_length):tvb(), pktinfo, root)
+	-- Radiotap will take care of the 802.11 frame for us.
+	radiotap:call(tvbuf(RADIOTAP_OFFSET, pktlen - RADIOTAP_OFFSET):tvb(), pktinfo, root)
+	
+	-- CloudMAC Fields:
+	local ieee802_11_bssid = ieee802_11_bssid_f()
+	local ieee802_11_source = ieee802_11_source_f()
+	
+	-- CloudMAC can take two different forms.
+	if ieee802_11_source == ieee802_11_bssid then
+		-- Inbound frame.
+		tree:add(cloudmac_dst, tvbuf:range(CLOUDMAC_DST_OFFSET, CLOUDMAC_DST_LEN))
+		tree:add(cloudmac_src, tvbuf:range(CLOUDMAC_SRC_OFFSET, CLOUDMAC_SRC_LEN))
+		tree:add(cloudmac_ethertype, tvbuf:range(CLOUDMAC_ETHERTYPE_OFFSET, CLOUDMAC_ETHERTYPE_LEN))		
+		tree:set_text("CloudMAC, Inbound Frame")
+	else 
+		-- Outbound frame.
+		local rate_mbps = tvbuf:range(CLOUDMAC_RATE_OFFSET, CLOUDMAC_RATE_LEN):uint() * 0.5;
+		local vapid_0 = tvbuf:range(CLOUDMAC_VAPID_OFFSET + 0, 1)
+		local vapid_1 = tvbuf:range(CLOUDMAC_VAPID_OFFSET + 1, 1)
+		local vapid_2 = tvbuf:range(CLOUDMAC_VAPID_OFFSET + 2, 1)
+		local vapid_3 = tvbuf:range(CLOUDMAC_VAPID_OFFSET + 3, 1)
+		local vapid = tostring(vapid_0) .. ":" .. tostring(vapid_1) .. ":" .. tostring(vapid_2) .. ":" .. tostring(vapid_3)
+	
+		tree:add(cloudmac_dst, tvbuf:range(CLOUDMAC_DST_OFFSET, CLOUDMAC_DST_LEN))
+		tree:add(cloudmac_signal, tvbuf:range(CLOUDMAC_SIGNAL_OFFSET, CLOUDMAC_SIGNAL_LEN)):append_text(" dBm")
+		tree:add(cloudmac_rate, tvbuf:range(CLOUDMAC_RATE_OFFSET, CLOUDMAC_RATE_LEN), rate_mbps):append_text(" Mb/s")
+		tree:add(cloudmac_vapid, tvbuf:range(CLOUDMAC_VAPID_OFFSET, CLOUDMAC_VAPID_LEN), vapid)
+		tree:add(cloudmac_ethertype, tvbuf:range(CLOUDMAC_ETHERTYPE_OFFSET, CLOUDMAC_ETHERTYPE_LEN))
+		tree:set_text("CloudMAC, Outbound Frame")
+	end
+	
 	pktinfo.cols.protocol:set("CloudMAC")
 end
 
+-- Check if the packet is a CloudMAC packet.
 local function cloudmac_heur_dissect(tvbuf, pktinfo, root)
-	-- Check if the packet is a CloudMAC packet.
 	local pktlen = tvbuf:reported_length_remaining()
 
 	if pktlen < CLOUDMAC_MIN_LEN then
 		return false
 	end
 
-	if tostring(tvbuf:range(CLOUDMAC_TYPE_OFFSET, CLOUDMAC_TYPE_LEN)) ~= "1337" then
+	if tostring(tvbuf:range(CLOUDMAC_ETHERTYPE_OFFSET, CLOUDMAC_ETHERTYPE_LEN)) ~= "1337" then
 		return false
 	end
 
@@ -70,4 +128,5 @@ local function cloudmac_heur_dissect(tvbuf, pktinfo, root)
 	return true
 end
 
+-- Register to dissect ethernet packets.
 cloudmac:register_heuristic("eth", cloudmac_heur_dissect)
