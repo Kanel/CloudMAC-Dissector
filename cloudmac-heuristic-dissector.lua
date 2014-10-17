@@ -1,5 +1,6 @@
--- Written by: Joakim Carlsson
--- Last changed: 2014-10-17
+-- Written by	| Joakim Carlsson
+-- Last changed | 2014-10-17
+-- Note 	| Only works on Wireshark 1.11.3 or newer.
 --
 -- CloudMAC packets can take two different forms depending on if they're inbound or outbound.
 --
