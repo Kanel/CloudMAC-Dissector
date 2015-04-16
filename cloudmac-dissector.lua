@@ -26,7 +26,7 @@
 -- | Destination: MAC address of the receiver.
 -- | Source: MAC Address of the sender.
 -- | Signal: Received signal strength in dBm. The intention being that the transmission power should conform to this value rather than the Radiotap headers value.
--- | Rate: Transmission rate in units of 100 Kbps; a value of 108 would mean 54 Mbps. The intention is to be able to manipulate the transmission rate of traffic by directly changing this value.
+-- | Rate: Transmission rate in units of 500 Kbps; a value of 108 would mean 54 Mbps. The intention is to be able to manipulate the transmission rate of traffic by directly changing this value.
 -- | VAP Identification: The identity of the access point handling this traffic; the last four bytes of access points MAC address.
 -- | Ethernet Type: The Ethernet type for CloudMAC packets; it's value is 0x1337 (4919).
 
